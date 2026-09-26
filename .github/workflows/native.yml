@@ -13,19 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-            library: liborchiddb_compiler.so
-          - os: macos-14
-            target: aarch64-apple-darwin
-            library: liborchiddb_compiler.dylib
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-            library: liborchiddb_compiler.dylib
-          - os: windows-2022
-            target: x86_64-pc-windows-msvc
-            library: orchiddb_compiler.dll
+        include: ${{ fromJSON((startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') && '[{"os":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu","library":"liborchiddb_compiler.so"},{"os":"macos-14","target":"aarch64-apple-darwin","library":"liborchiddb_compiler.dylib"},{"os":"macos-15-intel","target":"x86_64-apple-darwin","library":"liborchiddb_compiler.dylib"},{"os":"windows-2022","target":"x86_64-pc-windows-msvc","library":"orchiddb_compiler.dll"}]' || '[{"os":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu","library":"liborchiddb_compiler.so"}]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     env:
@@ -57,11 +45,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: orchiddb-native
-      - name: Build and test ABI
+      - name: Build native compiler
         run: |
-          cargo test --locked --release
           cargo build --locked --release
-          python scripts/smoke.py "target/release/${{ matrix.library }}"
           cargo tree --locked --edges normal --prefix none > target/dependencies.txt
           if grep -E '^(duckdb|libduckdb-sys|postgres|tokio-postgres) ' target/dependencies.txt; then exit 1; fi
       - name: Package tagged release

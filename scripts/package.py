@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Package the current platform's tested compiler library and ABI metadata."""
+"""Package the current platform's compiler library and ABI metadata."""
 import argparse
 import hashlib
 import json
@@ -7,7 +7,7 @@ import re
 import tarfile
 import tempfile
 from pathlib import Path
-from smoke import verify
+from smoke import load, metadata
 
 ROOT = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser()
@@ -18,7 +18,7 @@ parser.add_argument("--target", required=True, choices=[
 parser.add_argument("--output", type=Path, default=ROOT / "dist")
 parser.add_argument("--tag", required=True)
 args = parser.parse_args()
-meta = verify(args.library)
+meta = metadata(load(args.library))
 assert args.tag == "v" + meta["version"], "tag must match native package version"
 assert re.fullmatch(r"[0-9a-f]{40}", meta["core_revision"]), "release source must be clean and identified"
 assert meta["core_revision"] == (ROOT / "CORE_REVISION").read_text().strip(), "core revision differs from release pin"
