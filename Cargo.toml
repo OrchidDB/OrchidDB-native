@@ -18,3 +18,9 @@ tokio = { version = "1", features = ["rt-multi-thread"] }
 
 [profile.dev]
 debug = 0
+
+# Shipped inside every language package; keep unwinding for the C ABI's catch_unwind.
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1

@@ -1,6 +1,9 @@
-use std::{env, path::Path, process::Command};
+use std::{env, path::PathBuf, process::Command};
 fn main() {
-    let core = Path::new(env!("CARGO_MANIFEST_DIR")).join("../orchiddb");
+    // Cargo supplies the active checkout at build-script execution time.
+    // Do not bake a previous checkout into a shared target-cache executable.
+    let core = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+        .join("../orchiddb");
     let git = |args: &[&str]| {
         Command::new("git")
             .arg("-C")
