@@ -1,4 +1,4 @@
-//! Compiler-only C ABI. No database handles or result data cross this boundary.
+//! Shared planning and statistics C ABI. Database sessions remain caller-owned.
 use std::{
     ffi::{CStr, CString, c_char},
     panic::{AssertUnwindSafe, catch_unwind},
@@ -22,7 +22,7 @@ pub extern "C" fn orchiddb_core_revision() -> *const c_char {
         .cast()
 }
 
-fn compile(input: String) -> Result<serde_json::Value, String> {
+fn dispatch(input: String, statistics: bool) -> Result<serde_json::Value, String> {
     static RUNTIME: OnceLock<Result<tokio::runtime::Runtime, String>> = OnceLock::new();
     let runtime = RUNTIME
         .get_or_init(|| {
@@ -38,7 +38,11 @@ fn compile(input: String) -> Result<serde_json::Value, String> {
     // Avoid recursively planning on small foreign-language/NIF stacks. No database is opened.
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     runtime.spawn(async move {
-        let result = orchiddb::compiler::compile_json(&input).await;
+        let result = if statistics {
+            orchiddb::ir::rel::statistics::command(&input).await
+        } else {
+            orchiddb::compiler::compile_json(&input).await
+        };
         let _ = sender.send(result);
     });
     let output = receiver
@@ -54,6 +58,18 @@ fn compile(input: String) -> Result<serde_json::Value, String> {
 /// The returned pointer must be freed exactly once with `orchiddb_string_free`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn orchiddb_compile_json(input: *const c_char) -> *mut c_char {
+    unsafe { invoke_json(input, false) }
+}
+
+/// Execute a statistics protocol command. Response ownership matches compile_json.
+/// # Safety
+/// Input must be null or a valid NUL-terminated UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn orchiddb_statistics_json(input: *const c_char) -> *mut c_char {
+    unsafe { invoke_json(input, true) }
+}
+
+unsafe fn invoke_json(input: *const c_char, statistics: bool) -> *mut c_char {
     let result = catch_unwind(AssertUnwindSafe(|| {
         if input.is_null() {
             return Err("input must not be null".to_string());
@@ -61,7 +77,7 @@ pub unsafe extern "C" fn orchiddb_compile_json(input: *const c_char) -> *mut c_c
         let text = unsafe { CStr::from_ptr(input) }
             .to_str()
             .map_err(|_| "input must be UTF-8".to_string())?;
-        compile(text.to_owned())
+        dispatch(text.to_owned(), statistics)
     }));
     let response = match result {
         Ok(Ok(result)) => serde_json::json!({"ok": true, "result": result}),
@@ -125,5 +141,65 @@ mod tests {
         for thread in threads {
             thread.join().unwrap();
         }
+    }
+    #[test]
+    fn statistics_catalog_lifecycle() {
+        fn command(value: serde_json::Value) -> serde_json::Value {
+            let input = CString::new(value.to_string()).unwrap();
+            let out = unsafe { orchiddb_statistics_json(input.as_ptr()) };
+            assert!(!out.is_null());
+            let response: serde_json::Value =
+                serde_json::from_str(unsafe { CStr::from_ptr(out) }.to_str().unwrap()).unwrap();
+            unsafe { orchiddb_string_free(out) };
+            assert_eq!(response["ok"], true, "{response}");
+            response["result"].clone()
+        }
+        let request = serde_json::json!({"version":1,"dialect":"duckdb","language":"cypher","query":"RETURN 42 AS answer","tables":[],"nodes":[]});
+        let state = command(serde_json::json!({"op":"begin","request":request}));
+        assert!(state["request"].is_null());
+        let finished = command(serde_json::json!({"op":"finish","id":state["id"]}));
+        let compiled = command(
+            serde_json::json!({"op":"compile","catalog_id":finished["catalog_id"],"request":request}),
+        );
+        assert_eq!(compiled["fields"], serde_json::json!(["answer"]));
+        let installed =
+            command(serde_json::json!({"op":"install","snapshot":finished["snapshot"]}));
+        command(serde_json::json!({"op":"release","catalog_id":installed["catalog_id"]}));
+        command(serde_json::json!({"op":"release","catalog_id":finished["catalog_id"]}));
+        let invalid = unsafe { orchiddb_statistics_json(std::ptr::null()) };
+        let response: serde_json::Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(invalid) }.to_str().unwrap()).unwrap();
+        assert_eq!(response["ok"], false);
+        unsafe { orchiddb_string_free(invalid) };
+    }
+    #[test]
+    fn malformed_arrow_does_not_poison_statistics_registry() {
+        fn command(value: serde_json::Value) -> serde_json::Value {
+            let input = CString::new(value.to_string()).unwrap();
+            let out = unsafe { orchiddb_statistics_json(input.as_ptr()) };
+            let response =
+                serde_json::from_str(unsafe { CStr::from_ptr(out) }.to_str().unwrap()).unwrap();
+            unsafe { orchiddb_string_free(out) };
+            response
+        }
+        let state = command(serde_json::json!({"op":"begin", "request":{
+            "version":1,"dialect":"duckdb","language":"cypher","query":"RETURN 1",
+            "tables":[{"name":"people","columns":[{"name":"id","data_type":"int64"}]}]
+        }}));
+        assert_eq!(state["ok"], true, "{state}");
+        let id = &state["result"]["id"];
+        // IPC with an invalid integer bit width, formerly triggering an Arrow
+        // decoder panic while the statistics registry mutex was held.
+        let bad = command(serde_json::json!({"op":"submit","id":id,
+            "request_id":state["result"]["request"]["id"],
+            "ipc":include_str!("../tests/fixtures/invalid-arrow-int.base64").trim()}));
+        assert_eq!(bad["ok"], false);
+        let next = command(serde_json::json!({"op":"next","id":id}));
+        assert_eq!(next["ok"], true, "{next}");
+        assert_eq!(next["result"]["request"], state["result"]["request"]);
+        assert_eq!(
+            command(serde_json::json!({"op":"cancel","id":id}))["ok"],
+            true
+        );
     }
 }

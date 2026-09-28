@@ -20,6 +20,9 @@ ORCHIDDB_API const char *orchiddb_core_revision(void);
  * Null/invalid UTF-8/invalid requests return an error envelope. Invalid pointers
  * are a caller error. No connection setup, execution, or implicit downloads. */
 ORCHIDDB_API char *orchiddb_compile_json(const char *input);
+/* Statistics coordinator: begin/next/submit/finish/cancel/install/release/compile.
+ * Accepts bounded Arrow IPC or row samples; same response envelope and ownership. */
+ORCHIDDB_API char *orchiddb_statistics_json(const char *input);
 ORCHIDDB_API void orchiddb_string_free(char *response);
 #ifdef __cplusplus
 }

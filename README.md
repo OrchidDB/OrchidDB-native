@@ -5,9 +5,10 @@ Elixir and C++ clients can load this library without a DuckDB dependency.
 Java retains its existing JNI compiler binding; Rust uses the Rust API.
 
 The contract is **query + schema/mapping metadata → SQL + output field names**.
-No database connection, source rows, Arrow buffers or query results enter this
-library. The application executes SQL and consumes Arrow batches through its
-own engine adapter. Dialect support and read-only compiler limitations are
+Database connections remain application-owned. Compilation returns SQL and
+plan diagnostics. Explicit statistics generation accepts bounded Arrow IPC
+samples from the application session; the shared Rust coordinator collects and
+retains a reusable statistics snapshot. Dialect support and read-only compiler limitations are
 in the [compiler guide](https://github.com/OrchidDB/OrchidDB/blob/main/docs/compiler.md).
 
 ## Build
@@ -34,6 +35,7 @@ uint32_t orchiddb_abi_version(void);
 const char *orchiddb_version(void);
 const char *orchiddb_core_revision(void);
 char *orchiddb_compile_json(const char *input);
+char *orchiddb_statistics_json(const char *input);
 void orchiddb_string_free(char *response);
 ```
 
@@ -47,8 +49,8 @@ The result is an owned UTF-8 JSON envelope:
 Errors use `{"ok":false,"error":"..."}`. Free every response exactly once with
 `orchiddb_string_free`; that function accepts null. Never free borrowed version
 or revision strings. Invalid raw pointers and double frees are caller errors.
-Requests and responses contain no query-result data, but may contain sensitive
-parameter values; do not log them indiscriminately.
+Statistics submissions contain sampled source data; compilation requests may
+contain sensitive parameter values. Treat both as application data.
 
 Calls may be concurrent. A process-wide two-worker runtime gives recursive
 planning a 16 MiB native stack. Calls synchronously wait for compilation; language
@@ -77,3 +79,21 @@ credentials or trusted-publisher configuration. No release is published merely
 by pushing the source repository.
 
 See [LICENSE.md](LICENSE.md) for the applicable license.
+
+## One-time statistics
+
+`orchiddb_statistics_json` uses the same UTF-8 envelope and string ownership as
+compilation. Send `begin` with the normal request metadata, then execute each
+returned collection request through the existing application session. Submit
+bounded samples as base64 Arrow IPC (`ipc`) or row objects (`rows`). Batch
+submissions use `done:false`; a final submission completes the request. Report
+execution failures with `error` so the coordinator can record partial coverage.
+Honor every request's timeout, row, and byte limits; unsupported adapters must
+report an error rather than execute an unbounded fallback.
+
+`finish` returns a portable `snapshot`, a retained `catalog_id`, and a coverage
+`report`. Use `compile` with this handle and normal query request to avoid
+repeated snapshot serialization. `install` restores a saved snapshot; `release`
+frees a catalog; `cancel` discards unfinished collection. The coordinator owns
+statistics algorithms, collection planning, and budgets. Clients own database
+execution. There are no collection tiers or background refreshes.
