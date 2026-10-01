@@ -61,6 +61,66 @@ pub unsafe extern "C" fn orchiddb_compile_json(input: *const c_char) -> *mut c_c
     unsafe { invoke_json(input, false) }
 }
 
+/// Bind a live Arrow C stream into a compiled SELECT. No database is accessed.
+///
+/// # Safety
+/// `input` must be a valid UTF-8 C string containing a plan and relation name.
+/// `stream` must point to a valid Arrow C stream. Ownership moves into this call:
+/// its release callback is cleared and all imported resources are released here.
+/// Free the returned response with `orchiddb_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn orchiddb_bind_arrow_json(
+    input: *const c_char,
+    stream: *mut arrow::ffi_stream::FFI_ArrowArrayStream,
+) -> *mut c_char {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<serde_json::Value, String> {
+        if input.is_null() || stream.is_null() {
+            return Err("null binding argument".into());
+        }
+        let reader = unsafe { arrow::ffi_stream::ArrowArrayStreamReader::from_raw(stream) }
+            .map_err(|e| e.to_string())?;
+        let command: serde_json::Value = serde_json::from_str(
+            unsafe { CStr::from_ptr(input) }
+                .to_str()
+                .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        let mut plan = command["plan"].clone();
+        if plan["version"] != 1 {
+            return Err("unsupported bind plan version".into());
+        }
+        let name = command["relation"].as_str().ok_or("missing relation")?;
+        let index = plan["transfers"]
+            .as_array()
+            .ok_or("missing transfers")?
+            .iter()
+            .position(|t| t["target_relation"].as_str() == Some(name))
+            .ok_or("unknown exchange relation")?;
+        let transfer =
+            serde_json::from_value(plan["transfers"][index].clone()).map_err(|e| e.to_string())?;
+        let batches = reader
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        let sql = orchiddb::federation::bind_batches(
+            plan["sql"].as_str().ok_or("missing SQL")?,
+            plan["dialect"].as_str().ok_or("missing dialect")?,
+            &transfer,
+            &batches,
+        )?;
+        plan["sql"] = sql.into();
+        plan["transfers"].as_array_mut().unwrap().remove(index);
+        Ok(plan)
+    }));
+    let response = match result {
+        Ok(Ok(result)) => serde_json::json!({"ok":true,"result":result}),
+        Ok(Err(error)) => serde_json::json!({"ok":false,"error":error}),
+        Err(_) => {
+            serde_json::json!({"ok":false,"error":"Arrow binding panicked; no SQL was executed"})
+        }
+    };
+    CString::new(response.to_string()).unwrap().into_raw()
+}
+
 /// Execute a statistics protocol command. Response ownership matches compile_json.
 /// # Safety
 /// Input must be null or a valid NUL-terminated UTF-8 string.

@@ -35,6 +35,7 @@ uint32_t orchiddb_abi_version(void);
 const char *orchiddb_version(void);
 const char *orchiddb_core_revision(void);
 char *orchiddb_compile_json(const char *input);
+char *orchiddb_bind_arrow_json(const char *input, struct ArrowArrayStream *stream);
 char *orchiddb_statistics_json(const char *input);
 void orchiddb_string_free(char *response);
 ```
@@ -51,6 +52,13 @@ Errors use `{"ok":false,"error":"..."}`. Free every response exactly once with
 or revision strings. Invalid raw pointers and double frees are caller errors.
 Statistics submissions contain sampled source data; compilation requests may
 contain sensitive parameter values. Treat both as application data.
+
+Mixed-engine compilation returns SQL islands in `transfers`. The `bind` JSON
+operation accepts `plan`, `relation`, and either typed `rows` or base64 Arrow
+`ipc`. `orchiddb_bind_arrow_json` instead accepts `plan` and `relation` with a live
+Arrow C stream. With non-null arguments it consumes the stream, including on
+errors. Both interfaces bind values into query-scoped CTEs and execute no SQL.
+See the [SQL engines guide](https://github.com/OrchidDB/OrchidDB/blob/main/docs/sql-engines.md).
 
 Calls may be concurrent. A process-wide two-worker runtime gives recursive
 planning a 16 MiB native stack. Calls synchronously wait for compilation; language
