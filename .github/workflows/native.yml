@@ -48,6 +48,8 @@ jobs:
       - name: Build native compiler
         run: |
           cargo build --locked --release
+          cargo test --locked --release
+          python scripts/smoke.py "target/release/${{ matrix.library }}"
           cargo tree --locked --edges normal --prefix none > target/dependencies.txt
           if grep -E '^(duckdb|libduckdb-sys|postgres|tokio-postgres) ' target/dependencies.txt; then exit 1; fi
       - name: Package tagged release
