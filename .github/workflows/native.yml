@@ -48,7 +48,14 @@ jobs:
           actual=$(gh api "repos/OrchidDB/OrchidDB-native/actions/runs/$REUSE_RUN_ID" --jq .head_sha)
           test "$actual" = "$expected"
           gh run download "$REUSE_RUN_ID" --repo OrchidDB/OrchidDB-native --name 'compiler-${{ matrix.target }}' --dir dist
-          (cd dist && shasum -a 256 -c *.sha256)
+          python - <<'PYTHON'
+          import hashlib
+          from pathlib import Path
+          root = Path('dist')
+          for checksum in root.glob('*.sha256'):
+              sha, name = checksum.read_text().split()
+              assert hashlib.sha256((root / name).read_bytes()).hexdigest() == sha, name
+          PYTHON
           echo 'reused=true' >> "$GITHUB_OUTPUT"
       - name: Read pinned core
         if: steps.reuse.outputs.reused != 'true'
