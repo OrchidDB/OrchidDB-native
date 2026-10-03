@@ -181,7 +181,7 @@ mod tests {
             unsafe { CStr::from_ptr(orchiddb_version()) }
                 .to_str()
                 .unwrap(),
-            "0.1.0"
+            env!("CARGO_PKG_VERSION")
         );
         assert_eq!(unsafe { invoke(std::ptr::null()) }["ok"], false);
         assert_eq!(unsafe { invoke(c"not-json".as_ptr()) }["ok"], false);
