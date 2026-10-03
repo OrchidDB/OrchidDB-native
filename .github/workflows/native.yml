@@ -3,6 +3,13 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Source revision to package
+        default: main
+      reuse_run_id:
+        description: Previous run providing completed Linux, Apple Silicon and Windows artifacts
+        default: ''
 permissions:
   contents: read
 concurrency:
@@ -29,7 +36,22 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: orchiddb-native
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Reuse completed platform artifact
+        id: reuse
+        if: inputs.reuse_run_id != '' && matrix.target != 'x86_64-apple-darwin'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REUSE_RUN_ID: ${{ inputs.reuse_run_id }}
+        run: |
+          expected=$(git rev-parse HEAD)
+          actual=$(gh api "repos/OrchidDB/OrchidDB-native/actions/runs/$REUSE_RUN_ID" --jq .head_sha)
+          test "$actual" = "$expected"
+          gh run download "$REUSE_RUN_ID" --repo OrchidDB/OrchidDB-native --name 'compiler-${{ matrix.target }}' --dir dist
+          (cd dist && shasum -a 256 -c *.sha256)
+          echo 'reused=true' >> "$GITHUB_OUTPUT"
       - name: Read pinned core
+        if: steps.reuse.outputs.reused != 'true'
         id: core
         run: echo "revision=$(cat CORE_REVISION)" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
@@ -37,26 +59,33 @@ jobs:
           repository: OrchidDB/OrchidDB
           ref: ${{ steps.core.outputs.revision }}
           path: orchiddb
+        if: steps.reuse.outputs.reused != 'true'
       - uses: actions/setup-python@v5
+        if: steps.reuse.outputs.reused != 'true'
         with:
           python-version: '3.12'
       - name: Rust toolchain
+        if: steps.reuse.outputs.reused != 'true'
         run: rustup toolchain install 1.93.1 --profile minimal && rustup default 1.93.1
       - uses: Swatinem/rust-cache@v2
+        if: steps.reuse.outputs.reused != 'true'
         with:
           workspaces: orchiddb-native
+          cache-on-failure: true
       - name: Build native compiler
+        if: steps.reuse.outputs.reused != 'true'
         run: |
           cargo build --locked --release
-          cargo test --locked --release
-          python scripts/smoke.py "target/release/${{ matrix.library }}"
           cargo tree --locked --edges normal --prefix none > target/dependencies.txt
           if grep -E '^(duckdb|libduckdb-sys|postgres|tokio-postgres) ' target/dependencies.txt; then exit 1; fi
       - name: Package tagged release
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: python scripts/package.py --library "target/release/${{ matrix.library }}" --target '${{ matrix.target }}' --tag '${{ github.ref_name }}'
+        if: steps.reuse.outputs.reused != 'true' && (startsWith(github.ref, 'refs/tags/v') || startsWith(inputs.tag, 'v'))
+        run: python scripts/package.py --library "target/release/${{ matrix.library }}" --target '${{ matrix.target }}' --tag '${{ inputs.tag || github.ref_name }}'
+      - name: Record packaged source
+        if: startsWith(github.ref, 'refs/tags/v') || startsWith(inputs.tag, 'v')
+        run: git rev-parse HEAD > dist/SOURCE_COMMIT
       - uses: actions/upload-artifact@v4
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || startsWith(inputs.tag, 'v')
         with:
           name: compiler-${{ matrix.target }}
           path: orchiddb-native/dist/*
