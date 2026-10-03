@@ -1,120 +1,89 @@
-name: Native compiler
+name: Build native compiler
+run-name: native ${{ inputs.request_id }} ${{ inputs.tag }} ${{ inputs.platform }}
 on:
-  push:
-  pull_request:
   workflow_dispatch:
     inputs:
       tag:
-        description: Source revision to package
-        default: main
-      reuse_run_id:
-        description: Previous run providing completed Linux, Apple Silicon and Windows artifacts
+        description: Immutable version tag to build
+        required: true
+        type: string
+      platform:
+        description: Build only this platform; completed platforms are retained
+        type: choice
+        default: all
+        options:
+        - all
+        - linux-x86_64
+        - macos-aarch64
+        - macos-x86_64
+        - windows-x86_64
+      request_id:
+        description: Coordinator id for safe resume and dispatch recovery
+        type: string
         default: ''
 permissions:
   contents: read
 concurrency:
-  group: native-${{ github.ref }}
-  cancel-in-progress: true
+  group: native-${{ inputs.tag }}-${{ inputs.platform }}
+  cancel-in-progress: false
 jobs:
   build:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON((startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') && '[{"os":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu","library":"liborchiddb_compiler.so"},{"os":"macos-14","target":"aarch64-apple-darwin","library":"liborchiddb_compiler.dylib"},{"os":"macos-15-intel","target":"x86_64-apple-darwin","library":"liborchiddb_compiler.dylib"},{"os":"windows-2022","target":"x86_64-pc-windows-msvc","library":"orchiddb_compiler.dll"}]' || '[{"os":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu","library":"liborchiddb_compiler.so"}]') }}
+        include: ${{ fromJSON(inputs.platform == 'linux-x86_64' && '[{"os":"ubuntu-22.04","platform":"linux-x86_64","target":"x86_64-unknown-linux-gnu","library":"liborchiddb_compiler.so"}]'
+          || inputs.platform == 'macos-aarch64' && '[{"os":"macos-14","platform":"macos-aarch64","target":"aarch64-apple-darwin","library":"liborchiddb_compiler.dylib"}]'
+          || inputs.platform == 'macos-x86_64' && '[{"os":"macos-15-intel","platform":"macos-x86_64","target":"x86_64-apple-darwin","library":"liborchiddb_compiler.dylib"}]'
+          || inputs.platform == 'windows-x86_64' && '[{"os":"windows-2022","platform":"windows-x86_64","target":"x86_64-pc-windows-msvc","library":"orchiddb_compiler.dll"}]'
+          || '[{"os":"ubuntu-22.04","platform":"linux-x86_64","target":"x86_64-unknown-linux-gnu","library":"liborchiddb_compiler.so"},{"os":"macos-14","platform":"macos-aarch64","target":"aarch64-apple-darwin","library":"liborchiddb_compiler.dylib"},{"os":"macos-15-intel","platform":"macos-x86_64","target":"x86_64-apple-darwin","library":"liborchiddb_compiler.dylib"},{"os":"windows-2022","platform":"windows-x86_64","target":"x86_64-pc-windows-msvc","library":"orchiddb_compiler.dll"}]')
+          }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     env:
       CARGO_BUILD_JOBS: 2
       CARGO_PROFILE_RELEASE_DEBUG: 0
-      ORCHIDDB_RELEASE_BUILD: 1
+      ORCHIDDB_RELEASE_BUILD: '1'
       MACOSX_DEPLOYMENT_TARGET: '11.0'
+      RELEASE_TAG: ${{ inputs.tag }}
     defaults:
       run:
         shell: bash
         working-directory: orchiddb-native
     steps:
-      - uses: actions/checkout@v4
-        with:
-          path: orchiddb-native
-          ref: ${{ inputs.tag || github.ref }}
-      - name: Reuse completed platform artifact
-        id: reuse
-        if: inputs.reuse_run_id != '' && matrix.target != 'x86_64-apple-darwin'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REUSE_RUN_ID: ${{ inputs.reuse_run_id }}
-        run: |
-          expected=$(git rev-parse HEAD)
-          actual=$(gh api "repos/OrchidDB/OrchidDB-native/actions/runs/$REUSE_RUN_ID" --jq .head_sha)
-          test "$actual" = "$expected"
-          gh run download "$REUSE_RUN_ID" --repo OrchidDB/OrchidDB-native --name 'compiler-${{ matrix.target }}' --dir dist
-          python - <<'PYTHON'
-          import hashlib
-          from pathlib import Path
-          root = Path('dist')
-          for checksum in root.glob('*.sha256'):
-              sha, name = checksum.read_text().split()
-              assert hashlib.sha256((root / name).read_bytes()).hexdigest() == sha, name
-          PYTHON
-          echo 'reused=true' >> "$GITHUB_OUTPUT"
-      - name: Read pinned core
-        if: steps.reuse.outputs.reused != 'true'
-        id: core
-        run: echo "revision=$(cat CORE_REVISION)" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@v4
-        with:
-          repository: OrchidDB/OrchidDB
-          ref: ${{ steps.core.outputs.revision }}
-          path: orchiddb
-        if: steps.reuse.outputs.reused != 'true'
-      - uses: actions/setup-python@v5
-        if: steps.reuse.outputs.reused != 'true'
-        with:
-          python-version: '3.12'
-      - name: Rust toolchain
-        if: steps.reuse.outputs.reused != 'true'
-        run: rustup toolchain install 1.93.1 --profile minimal && rustup default 1.93.1
-      - uses: Swatinem/rust-cache@v2
-        if: steps.reuse.outputs.reused != 'true'
-        with:
-          workspaces: orchiddb-native
-          cache-on-failure: true
-      - name: Build native compiler
-        if: steps.reuse.outputs.reused != 'true'
-        run: |
-          cargo build --locked --release
-          cargo tree --locked --edges normal --prefix none > target/dependencies.txt
-          if grep -E '^(duckdb|libduckdb-sys|postgres|tokio-postgres) ' target/dependencies.txt; then exit 1; fi
-      - name: Package tagged release
-        if: steps.reuse.outputs.reused != 'true' && (startsWith(github.ref, 'refs/tags/v') || startsWith(inputs.tag, 'v'))
-        run: python scripts/package.py --library "target/release/${{ matrix.library }}" --target '${{ matrix.target }}' --tag '${{ inputs.tag || github.ref_name }}'
-      - name: Record packaged source
-        if: startsWith(github.ref, 'refs/tags/v') || startsWith(inputs.tag, 'v')
-        run: git rev-parse HEAD > dist/SOURCE_COMMIT
-      - uses: actions/upload-artifact@v4
-        if: startsWith(github.ref, 'refs/tags/v') || startsWith(inputs.tag, 'v')
-        with:
-          name: compiler-${{ matrix.target }}
-          path: orchiddb-native/dist/*
-          if-no-files-found: error
-  release:
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-22.04
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: compiler-*
-          merge-multiple: true
-          path: dist
-      - name: Draft versioned native release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          cat dist/*.sha256 > dist/SHA256SUMS
-          (cd dist && sha256sum -c SHA256SUMS)
-          gh release create "$RELEASE_TAG" dist/*.tar.gz dist/SHA256SUMS --verify-tag --draft --title "Native compiler $RELEASE_TAG" --notes-file RELEASE_NOTES.md
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ inputs.tag }}
+        path: orchiddb-native
+    - name: Read pinned core
+      id: core
+      run: echo "revision=$(cat CORE_REVISION)" >> "$GITHUB_OUTPUT"
+    - uses: actions/checkout@v4
+      with:
+        repository: OrchidDB/OrchidDB
+        ref: ${{ steps.core.outputs.revision }}
+        path: orchiddb
+    - uses: dtolnay/rust-toolchain@1.93.1
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: orchiddb-native
+        shared-key: release-native-${{ matrix.platform }}
+        cache-on-failure: true
+    - name: Build native compiler
+      run: |
+        cargo build --locked --release
+        cargo tree --locked --edges normal --prefix none > target/dependencies.txt
+        if grep -E "^(duckdb|libduckdb-sys|postgres|tokio-postgres) " target/dependencies.txt; then exit 1; fi
+    - name: Package compiler
+      run: python scripts/package.py --library "target/release/${{ matrix.library }}" --target "${{ matrix.target }}" --tag "$RELEASE_TAG"
+    - name: Record source revision
+      run: git rev-parse HEAD > dist/SOURCE_COMMIT
+    - uses: actions/upload-artifact@v4
+      with:
+        name: compiler-${{ matrix.target }}
+        path: orchiddb-native/dist/*
+        if-no-files-found: error
+        overwrite: true
+        retention-days: 30
